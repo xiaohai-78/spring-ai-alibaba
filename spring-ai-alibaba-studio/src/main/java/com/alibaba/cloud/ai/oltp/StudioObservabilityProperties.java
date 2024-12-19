@@ -19,6 +19,8 @@ package com.alibaba.cloud.ai.oltp;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
+import java.io.File;
+
 /**
  * @author 肖云涛
  * @date 2024/12/5
@@ -51,7 +53,11 @@ public class StudioObservabilityProperties {
 
 	public StudioObservabilityProperties() {
 		this.enabled = true;
-		this.outputFile = "spring-ai-alibaba-studio/spans.json";
+		File logDirectory = new File(System.getProperty("user.home"), "logs/spring-ai-alibaba-studio");
+		if (!logDirectory.exists()) {
+			logDirectory.mkdirs();
+		}
+		this.outputFile = new File(logDirectory, "trace.log").getAbsolutePath();
 	}
 
 }
