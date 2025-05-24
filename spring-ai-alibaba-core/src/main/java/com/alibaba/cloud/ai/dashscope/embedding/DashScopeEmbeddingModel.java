@@ -143,13 +143,20 @@ public class DashScopeEmbeddingModel extends AbstractEmbeddingModel {
 						return this.dashScopeApi.embeddings(apiRequest).getBody();
 					}
 					catch (Exception e) {
-						logger.error("Error embedding request: {}", request.getInstructions(), e);
+						String modelName = (apiRequest.model() != null) ? apiRequest.model() : "unknown";
+						int instructionCount = (apiRequest.input() != null) ? apiRequest.input().size() : 0;
+						logger.error("Error embedding request for model '{}' with {} instructions. Error: {}",
+							modelName, instructionCount, e.getMessage(), e);
 						throw e;
 					}
 				});
 
 				if (apiEmbeddingResponse == null) {
-					logger.warn("No embeddings returned for request: {}", request);
+					String modelName = (apiRequest.model() != null) ? apiRequest.model() : "unknown";
+					int instructionCount = (apiRequest.input() != null) ? apiRequest.input().size() : 0;
+					String requestId = (apiRequest.headers() != null && apiRequest.headers().containsKey("X-Request-ID")) ? apiRequest.headers().get("X-Request-ID") : "N/A";
+					logger.warn("No embeddings returned for request to model '{}' with {} instructions. API Request ID: {}",
+						modelName, instructionCount, requestId);
 					return new EmbeddingResponse(List.of());
 				}
 

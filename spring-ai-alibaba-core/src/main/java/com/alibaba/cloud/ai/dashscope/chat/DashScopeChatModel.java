@@ -65,6 +65,7 @@ import org.springframework.ai.chat.observation.ChatModelObservationDocumentation
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.ModelOptionsUtils;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.ai.model.tool.DefaultToolExecutionEligibilityPredicate;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
@@ -162,6 +163,7 @@ public class DashScopeChatModel implements ChatModel {
 	}
 
 	@Override
+	@Cacheable(cacheNames = "dashscopeChatCache", keyGenerator = "promptCacheKeyGenerator")
 	public ChatResponse call(Prompt prompt) {
 		Assert.notNull(prompt, "Prompt must not be null");
 		Assert.isTrue(!CollectionUtils.isEmpty(prompt.getInstructions()), "Prompt messages must not be empty");

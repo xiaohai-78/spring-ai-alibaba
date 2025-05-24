@@ -36,6 +36,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
+import reactor.core.publisher.SignalType;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.io.IOException;
@@ -53,6 +54,7 @@ public class DashScopeWebSocketClient extends WebSocketListener {
 	private final Logger logger = LoggerFactory.getLogger(DashScopeWebSocketClient.class);
 
 	private final DashScopeWebSocketClientOptions options;
+	private final OkHttpClient sharedOkHttpClient;
 
 	private WebSocket webSocketClient;
 
@@ -67,14 +69,49 @@ public class DashScopeWebSocketClient extends WebSocketListener {
 	public DashScopeWebSocketClient(DashScopeWebSocketClientOptions options) {
 		this.options = options;
 		this.isOpen = new AtomicBoolean(false);
+
+		HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
+		// Use the constant for level, assuming it might be configurable later
+		logging.setLevel(HttpLoggingInterceptor.Level.valueOf(DashScopeWebSocketClient.Constants.DEFAULT_HTTP_LOGGING_LEVEL));
+		Dispatcher dispatcher = new Dispatcher();
+		dispatcher.setMaxRequests(DashScopeWebSocketClient.Constants.DEFAULT_MAXIMUM_ASYNC_REQUESTS);
+		dispatcher.setMaxRequestsPerHost(DashScopeWebSocketClient.Constants.DEFAULT_MAXIMUM_ASYNC_REQUESTS_PER_HOST);
+
+		this.sharedOkHttpClient = new OkHttpClient.Builder()
+			.connectTimeout(DashScopeWebSocketClient.Constants.DEFAULT_CONNECT_TIMEOUT)
+			.readTimeout(DashScopeWebSocketClient.Constants.DEFAULT_READ_TIMEOUT)
+			.writeTimeout(DashScopeWebSocketClient.Constants.DEFAULT_WRITE_TIMEOUT)
+			.addInterceptor(logging)
+			.dispatcher(dispatcher)
+			.protocols(Collections.singletonList(Protocol.HTTP_1_1))
+			.connectionPool(new ConnectionPool(
+				DashScopeWebSocketClient.Constants.DEFAULT_CONNECTION_POOL_SIZE,
+				DashScopeWebSocketClient.Constants.DEFAULT_CONNECTION_IDLE_TIMEOUT.getSeconds(),
+				TimeUnit.SECONDS
+			))
+			.build();
 	}
 
 	public Flux<ByteBuffer> streamBinaryOut(String text) {
 		Flux<ByteBuffer> flux = Flux.<ByteBuffer>create(emitter -> {
 			this.binary_emitter = emitter;
-		}, FluxSink.OverflowStrategy.BUFFER);
+		}, FluxSink.OverflowStrategy.BUFFER)
+		.doOnCancel(() -> {
+			logger.info("streamBinaryOut cancelled by subscriber.");
+			closeWebSocketIfNeeded(1001, "Stream cancelled by client");
+		})
+		.doFinally(signalType -> {
+			// Close only on explicit completion or error from this flux,
+			// as the WebSocket might be used by another stream or kept open.
+			// This behavior might need adjustment based on whether one client instance handles one logical stream or multiple.
+			// Assuming one logical stream per client usage for now.
+			if (signalType == reactor.core.publisher.SignalType.ON_COMPLETE || signalType == reactor.core.publisher.SignalType.ON_ERROR) {
+				 logger.info("streamBinaryOut terminated with signal: {}", signalType);
+				 closeWebSocketIfNeeded(1000, "Stream terminated");
+			}
+		});
 
-		sendText(text);
+		sendText(text); // This might establish the WebSocket
 
 		return flux;
 	}
@@ -82,8 +119,21 @@ public class DashScopeWebSocketClient extends WebSocketListener {
 	public Flux<String> streamTextOut(Flux<ByteBuffer> binary) {
 		Flux<String> flux = Flux.<String>create(emitter -> {
 			this.text_emitter = emitter;
-		}, FluxSink.OverflowStrategy.BUFFER);
+		}, FluxSink.OverflowStrategy.BUFFER)
+		.doOnCancel(() -> {
+			logger.info("streamTextOut cancelled by subscriber.");
+			closeWebSocketIfNeeded(1001, "Stream cancelled by client");
+		})
+		.doFinally(signalType -> {
+			if (signalType == reactor.core.publisher.SignalType.ON_COMPLETE || signalType == reactor.core.publisher.SignalType.ON_ERROR) {
+				 logger.info("streamTextOut terminated with signal: {}", signalType);
+				 closeWebSocketIfNeeded(1000, "Stream terminated");
+			}
+		});
 
+		// Subscribe to binary input; this binary flux might also need similar doOnCancel/doFinally
+		// if its lifecycle dictates WebSocket closure. For now, assuming it's managed elsewhere or
+		// its termination is tied to this streamTextOut's termination.
 		binary.subscribe(this::sendBinary);
 
 		return flux;
@@ -102,41 +152,41 @@ public class DashScopeWebSocketClient extends WebSocketListener {
 	}
 
 	public void sendBinary(ByteBuffer binary) {
-		// TODO
-		// if (!isOpen.get()) {
-		// establishWebSocketClient();
-		// }
+		if (!isOpen.get()) {
+			establishWebSocketClient();
+		}
+
+		// Check if establishWebSocketClient() failed and isOpen is still false
+		if (!isOpen.get()) {
+			logger.error("WebSocket not open, cannot send binary data. Establish client failed previously or was closed.");
+			// Optionally, throw an exception or notify binary_emitter about the error
+			if (this.binary_emitter != null && !this.binary_emitter.isCancelled()) {
+				this.binary_emitter.error(new IOException("WebSocket not open, cannot send binary data."));
+			}
+			return;
+		}
 
 		boolean success = webSocketClient.send(ByteString.of(binary));
 
 		if (!success) {
 			logger.error("send binary failed");
+			// Optionally, notify binary_emitter about the error
+			if (this.binary_emitter != null && !this.binary_emitter.isCancelled()) {
+				this.binary_emitter.error(new IOException("Failed to send binary data over WebSocket."));
+			}
 		}
 	}
 
 	private void establishWebSocketClient() {
-		HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
-		logging.setLevel(HttpLoggingInterceptor.Level.valueOf(Constants.DEFAULT_HTTP_LOGGING_LEVEL));
-		Dispatcher dispatcher = new Dispatcher();
-		dispatcher.setMaxRequests(Constants.DEFAULT_MAXIMUM_ASYNC_REQUESTS);
-		dispatcher.setMaxRequestsPerHost(Constants.DEFAULT_MAXIMUM_ASYNC_REQUESTS_PER_HOST);
-
-		OkHttpClient.Builder clientBuilder = new OkHttpClient.Builder();
-		clientBuilder.connectTimeout(Constants.DEFAULT_CONNECT_TIMEOUT)
-			.readTimeout(Constants.DEFAULT_READ_TIMEOUT)
-			.writeTimeout(Constants.DEFAULT_WRITE_TIMEOUT)
-			.addInterceptor(logging)
-			.dispatcher(dispatcher)
-			.protocols(Collections.singletonList(Protocol.HTTP_1_1))
-			.connectionPool(new ConnectionPool(Constants.DEFAULT_CONNECTION_POOL_SIZE,
-					Constants.DEFAULT_CONNECTION_IDLE_TIMEOUT.getSeconds(), TimeUnit.SECONDS));
-		OkHttpClient httpClient = clientBuilder.build();
-
+		// OkHttpClient creation logic is removed from here
 		try {
-			webSocketClient = httpClient.newWebSocket(buildConnectionRequest(), this);
+			// Use the shared client
+			webSocketClient = this.sharedOkHttpClient.newWebSocket(buildConnectionRequest(), this);
 		}
 		catch (Throwable ex) {
 			logger.error("create websocket failed: msg={}", ex.getMessage());
+			// Consider if isOpen should be explicitly set to false or if an error should be propagated differently
+			// For now, existing behavior is maintained.
 		}
 	}
 
@@ -252,6 +302,43 @@ public class DashScopeWebSocketClient extends WebSocketListener {
 		if (this.text_emitter != null && !this.text_emitter.isCancelled()) {
 			logger.info("text emitter handling: error on {}", event);
 			this.text_emitter.error(t);
+		}
+	}
+
+	public void close(int code, String reason) {
+		logger.info("Explicitly closing WebSocket client with code: {}, reason: {}", code, reason);
+		closeWebSocketIfNeeded(code, reason);
+	}
+
+	private void closeWebSocketIfNeeded(int code, String reason) {
+		if (this.webSocketClient != null && this.isOpen.get()) {
+			logger.debug("Attempting to close WebSocket (if open) with code: {}, reason: {}", code, reason);
+			try {
+				boolean closed = this.webSocketClient.close(code, reason);
+				if (!closed) {
+					// According to OkHttp WebSocket.close documentation, it returns false
+					// if the connection is already closed or closing.
+					// It might also return false if the close message could not be queued.
+					// Forcing a cancel if close returns false and it's still open might be too aggressive
+					// as onClosed/onFailure should eventually trigger.
+					// logger.warn("WebSocket.close() returned false, but was open. State may be inconsistent.");
+				}
+				// Do not set isOpen.set(false) here; let the onClosed/onClosing callbacks handle it
+				// to maintain consistent state management.
+			} catch (Exception e) {
+				// This catch is for potential exceptions from webSocketClient.close() itself,
+				// though it's not common for it to throw.
+				logger.error("Exception while trying to close WebSocket: {}", e.getMessage(), e);
+				// Fallback to cancel if close fails catastrophically, or ensure resources are cleaned up.
+				// For now, just log. The onClosed/onFailure should still be the primary path for state change.
+				 if (this.webSocketClient != null) {
+					this.webSocketClient.cancel(); // As a last resort if close fails badly
+				 }
+				 isOpen.set(false); // If close itself threw, state is likely broken.
+				 emittersError("close_exception", e); // Notify emitters
+			}
+		} else {
+			logger.debug("WebSocket already closed or not initialized, no action needed for closeWebSocketIfNeeded.");
 		}
 	}
 
