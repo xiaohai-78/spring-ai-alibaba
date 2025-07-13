@@ -1,4 +1,4 @@
-# OpenTelemetry Observation configuration for Langfuse integration
+# OpenTelemetry Observation configuration
 management:
   endpoints:
     web:
@@ -16,8 +16,6 @@ management:
   observations:
     annotations:
       enabled: true
-
-# OpenTelemetry configuration
 otel:
   service:
     name: spring-ai-alibaba-deepresearch-langfuse
@@ -42,4 +40,4 @@ otel:
       headers:
         # Replace `YOUR_BASE64_ENCODED_CREDENTIALS` with your Base64-encoded `public_key:secret_key`.
         Authorization: "Basic ${YOUR_BASE64_ENCODED_CREDENTIALS}"
-      protocol: http/protobuf 
+      protocol: http/protobuf
